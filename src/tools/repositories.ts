@@ -6,7 +6,6 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebApi } from "azure-devops-node-api";
 import {
   GitRef,
-  GitForkRef,
   PullRequestStatus,
   GitQueryCommitsCriteria,
   GitVersionType,
@@ -14,8 +13,6 @@ import {
   GitPullRequestQuery,
   GitPullRequestQueryInput,
   GitPullRequestQueryType,
-  CommentThreadContext,
-  CommentThreadStatus,
 } from "azure-devops-node-api/interfaces/GitInterfaces.js";
 import { z } from "zod";
 import { getCurrentUserDetails, getUserIdFromEmail } from "./auth.js";
@@ -33,12 +30,6 @@ const REPO_TOOLS = {
   get_repo_by_name_or_id: "repo_get_repo_by_name_or_id",
   get_branch_by_name: "repo_get_branch_by_name",
   get_pull_request_by_id: "repo_get_pull_request_by_id",
-  create_pull_request: "repo_create_pull_request",
-  update_pull_request: "repo_update_pull_request",
-  update_pull_request_reviewers: "repo_update_pull_request_reviewers",
-  reply_to_comment: "repo_reply_to_comment",
-  create_pull_request_thread: "repo_create_pull_request_thread",
-  resolve_comment: "repo_resolve_comment",
   search_commits: "repo_search_commits",
   list_pull_requests_by_commits: "repo_list_pull_requests_by_commits",
 };
@@ -98,134 +89,8 @@ function filterReposByName(repositories: GitRepository[], repoNameFilter: string
 }
 
 function configureRepoTools(server: McpServer, tokenProvider: () => Promise<AccessToken>, connectionProvider: () => Promise<WebApi>, userAgentProvider: () => string) {
-  server.tool(
-    REPO_TOOLS.create_pull_request,
-    "Create a new pull request.",
-    {
-      repositoryId: z.string().describe("The ID of the repository where the pull request will be created."),
-      sourceRefName: z.string().describe("The source branch name for the pull request, e.g., 'refs/heads/feature-branch'."),
-      targetRefName: z.string().describe("The target branch name for the pull request, e.g., 'refs/heads/main'."),
-      title: z.string().describe("The title of the pull request."),
-      description: z.string().optional().describe("The description of the pull request. Optional."),
-      isDraft: z.boolean().optional().default(false).describe("Indicates whether the pull request is a draft. Defaults to false."),
-      workItems: z.string().optional().describe("Work item IDs to associate with the pull request, space-separated."),
-      forkSourceRepositoryId: z.string().optional().describe("The ID of the fork repository that the pull request originates from. Optional, used when creating a pull request from a fork."),
-    },
-    async ({ repositoryId, sourceRefName, targetRefName, title, description, isDraft, workItems, forkSourceRepositoryId }) => {
-      const connection = await connectionProvider();
-      const gitApi = await connection.getGitApi();
-      const workItemRefs = workItems ? workItems.split(" ").map((id) => ({ id: id.trim() })) : [];
 
-      const forkSource: GitForkRef | undefined = forkSourceRepositoryId
-        ? {
-            repository: {
-              id: forkSourceRepositoryId,
-            },
-          }
-        : undefined;
 
-      const pullRequest = await gitApi.createPullRequest(
-        {
-          sourceRefName,
-          targetRefName,
-          title,
-          description,
-          isDraft,
-          workItemRefs: workItemRefs,
-          forkSource,
-        },
-        repositoryId
-      );
-
-      return {
-        content: [{ type: "text", text: JSON.stringify(pullRequest, null, 2) }],
-      };
-    }
-  );
-
-  server.tool(
-    REPO_TOOLS.update_pull_request,
-    "Update a Pull Request by ID with specified fields.",
-    {
-      repositoryId: z.string().describe("The ID of the repository where the pull request exists."),
-      pullRequestId: z.number().describe("The ID of the pull request to update."),
-      title: z.string().optional().describe("The new title for the pull request."),
-      description: z.string().optional().describe("The new description for the pull request."),
-      isDraft: z.boolean().optional().describe("Whether the pull request should be a draft."),
-      targetRefName: z.string().optional().describe("The new target branch name (e.g., 'refs/heads/main')."),
-      status: z.enum(["Active", "Abandoned"]).optional().describe("The new status of the pull request. Can be 'Active' or 'Abandoned'."),
-    },
-    async ({ repositoryId, pullRequestId, title, description, isDraft, targetRefName, status }) => {
-      const connection = await connectionProvider();
-      const gitApi = await connection.getGitApi();
-
-      // Build update object with only provided fields
-      const updateRequest: {
-        title?: string;
-        description?: string;
-        isDraft?: boolean;
-        targetRefName?: string;
-        status?: number;
-      } = {};
-      if (title !== undefined) updateRequest.title = title;
-      if (description !== undefined) updateRequest.description = description;
-      if (isDraft !== undefined) updateRequest.isDraft = isDraft;
-      if (targetRefName !== undefined) updateRequest.targetRefName = targetRefName;
-      if (status !== undefined) {
-        updateRequest.status = status === "Active" ? PullRequestStatus.Active.valueOf() : PullRequestStatus.Abandoned.valueOf();
-      }
-
-      // Validate that at least one field is provided for update
-      if (Object.keys(updateRequest).length === 0) {
-        return {
-          content: [{ type: "text", text: "Error: At least one field (title, description, isDraft, targetRefName, or status) must be provided for update." }],
-          isError: true,
-        };
-      }
-
-      const updatedPullRequest = await gitApi.updatePullRequest(updateRequest, repositoryId, pullRequestId);
-
-      return {
-        content: [{ type: "text", text: JSON.stringify(updatedPullRequest, null, 2) }],
-      };
-    }
-  );
-
-  server.tool(
-    REPO_TOOLS.update_pull_request_reviewers,
-    "Add or remove reviewers for an existing pull request.",
-    {
-      repositoryId: z.string().describe("The ID of the repository where the pull request exists."),
-      pullRequestId: z.number().describe("The ID of the pull request to update."),
-      reviewerIds: z.array(z.string()).describe("List of reviewer ids to add or remove from the pull request."),
-      action: z.enum(["add", "remove"]).describe("Action to perform on the reviewers. Can be 'add' or 'remove'."),
-    },
-    async ({ repositoryId, pullRequestId, reviewerIds, action }) => {
-      const connection = await connectionProvider();
-      const gitApi = await connection.getGitApi();
-
-      let updatedPullRequest;
-      if (action === "add") {
-        updatedPullRequest = await gitApi.createPullRequestReviewers(
-          reviewerIds.map((id) => ({ id: id })),
-          repositoryId,
-          pullRequestId
-        );
-
-        return {
-          content: [{ type: "text", text: JSON.stringify(updatedPullRequest, null, 2) }],
-        };
-      } else {
-        for (const reviewerId of reviewerIds) {
-          await gitApi.deletePullRequestReviewer(repositoryId, pullRequestId, reviewerId);
-        }
-
-        return {
-          content: [{ type: "text", text: `Reviewers with IDs ${reviewerIds.join(", ")} removed from pull request ${pullRequestId}.` }],
-        };
-      }
-    }
-  );
 
   server.tool(
     REPO_TOOLS.list_repos_by_project,
@@ -467,6 +332,7 @@ function configureRepoTools(server: McpServer, tokenProvider: () => Promise<Acce
         publishedDate: thread.publishedDate,
         lastUpdatedDate: thread.lastUpdatedDate,
         status: thread.status,
+        threadContext: thread.threadContext, // Include file path and line information
         comments: trimComments(thread.comments),
       }));
 
@@ -625,169 +491,8 @@ function configureRepoTools(server: McpServer, tokenProvider: () => Promise<Acce
     }
   );
 
-  server.tool(
-    REPO_TOOLS.reply_to_comment,
-    "Replies to a specific comment on a pull request.",
-    {
-      repositoryId: z.string().describe("The ID of the repository where the pull request is located."),
-      pullRequestId: z.number().describe("The ID of the pull request where the comment thread exists."),
-      threadId: z.number().describe("The ID of the thread to which the comment will be added."),
-      content: z.string().describe("The content of the comment to be added."),
-      project: z.string().optional().describe("Project ID or project name (optional)"),
-      fullResponse: z.boolean().optional().default(false).describe("Return full comment JSON response instead of a simple confirmation message."),
-    },
-    async ({ repositoryId, pullRequestId, threadId, content, project, fullResponse }) => {
-      const connection = await connectionProvider();
-      const gitApi = await connection.getGitApi();
-      const comment = await gitApi.createComment({ content }, repositoryId, pullRequestId, threadId, project);
 
-      // Check if the comment was successfully created
-      if (!comment) {
-        return {
-          content: [{ type: "text", text: `Error: Failed to add comment to thread ${threadId}. The comment was not created successfully.` }],
-          isError: true,
-        };
-      }
 
-      if (fullResponse) {
-        return {
-          content: [{ type: "text", text: JSON.stringify(comment, null, 2) }],
-        };
-      }
-
-      return {
-        content: [{ type: "text", text: `Comment successfully added to thread ${threadId}.` }],
-      };
-    }
-  );
-
-  server.tool(
-    REPO_TOOLS.create_pull_request_thread,
-    "Creates a new comment thread on a pull request.",
-    {
-      repositoryId: z.string().describe("The ID of the repository where the pull request is located."),
-      pullRequestId: z.number().describe("The ID of the pull request where the comment thread exists."),
-      content: z.string().describe("The content of the comment to be added."),
-      project: z.string().optional().describe("Project ID or project name (optional)"),
-      filePath: z.string().optional().describe("The path of the file where the comment thread will be created. (optional)"),
-      status: z
-        .enum(getEnumKeys(CommentThreadStatus) as [string, ...string[]])
-        .optional()
-        .default(CommentThreadStatus[CommentThreadStatus.Active])
-        .describe("The status of the comment thread. Defaults to 'Active'."),
-      rightFileStartLine: z.number().optional().describe("Position of first character of the thread's span in right file. The line number of a thread's position. Starts at 1. (optional)"),
-      rightFileStartOffset: z
-        .number()
-        .optional()
-        .describe(
-          "Position of first character of the thread's span in right file. The line number of a thread's position. The character offset of a thread's position inside of a line. Starts at 1. Must only be set if rightFileStartLine is also specified. (optional)"
-        ),
-      rightFileEndLine: z
-        .number()
-        .optional()
-        .describe(
-          "Position of last character of the thread's span in right file. The line number of a thread's position. Starts at 1. Must only be set if rightFileStartLine is also specified. (optional)"
-        ),
-      rightFileEndOffset: z
-        .number()
-        .optional()
-        .describe(
-          "Position of last character of the thread's span in right file. The character offset of a thread's position inside of a line. Must only be set if rightFileEndLine is also specified. (optional)"
-        ),
-    },
-    async ({ repositoryId, pullRequestId, content, project, filePath, status, rightFileStartLine, rightFileStartOffset, rightFileEndLine, rightFileEndOffset }) => {
-      const connection = await connectionProvider();
-      const gitApi = await connection.getGitApi();
-
-      const threadContext: CommentThreadContext = { filePath: filePath };
-
-      if (rightFileStartLine !== undefined) {
-        if (rightFileStartLine < 1) {
-          throw new Error("rightFileStartLine must be greater than or equal to 1.");
-        }
-
-        threadContext.rightFileStart = { line: rightFileStartLine };
-
-        if (rightFileStartOffset !== undefined) {
-          if (rightFileStartOffset < 1) {
-            throw new Error("rightFileStartOffset must be greater than or equal to 1.");
-          }
-
-          threadContext.rightFileStart.offset = rightFileStartOffset;
-        }
-      }
-
-      if (rightFileEndLine !== undefined) {
-        if (rightFileStartLine === undefined) {
-          throw new Error("rightFileEndLine must only be specified if rightFileStartLine is also specified.");
-        }
-
-        if (rightFileEndLine < 1) {
-          throw new Error("rightFileEndLine must be greater than or equal to 1.");
-        }
-
-        threadContext.rightFileEnd = { line: rightFileEndLine };
-
-        if (rightFileEndOffset !== undefined) {
-          if (rightFileEndOffset < 1) {
-            throw new Error("rightFileEndOffset must be greater than or equal to 1.");
-          }
-
-          threadContext.rightFileEnd.offset = rightFileEndOffset;
-        }
-      }
-
-      const thread = await gitApi.createThread(
-        { comments: [{ content: content }], threadContext: threadContext, status: CommentThreadStatus[status as keyof typeof CommentThreadStatus] },
-        repositoryId,
-        pullRequestId,
-        project
-      );
-
-      return {
-        content: [{ type: "text", text: JSON.stringify(thread, null, 2) }],
-      };
-    }
-  );
-
-  server.tool(
-    REPO_TOOLS.resolve_comment,
-    "Resolves a specific comment thread on a pull request.",
-    {
-      repositoryId: z.string().describe("The ID of the repository where the pull request is located."),
-      pullRequestId: z.number().describe("The ID of the pull request where the comment thread exists."),
-      threadId: z.number().describe("The ID of the thread to be resolved."),
-      fullResponse: z.boolean().optional().default(false).describe("Return full thread JSON response instead of a simple confirmation message."),
-    },
-    async ({ repositoryId, pullRequestId, threadId, fullResponse }) => {
-      const connection = await connectionProvider();
-      const gitApi = await connection.getGitApi();
-      const thread = await gitApi.updateThread(
-        { status: 2 }, // 2 corresponds to "Resolved" status
-        repositoryId,
-        pullRequestId,
-        threadId
-      );
-
-      // Check if the thread was successfully resolved
-      if (!thread) {
-        return {
-          content: [{ type: "text", text: `Error: Failed to resolve thread ${threadId}. The thread status was not updated successfully.` }],
-          isError: true,
-        };
-      }
-
-      if (fullResponse) {
-        return {
-          content: [{ type: "text", text: JSON.stringify(thread, null, 2) }],
-        };
-      }
-
-      return {
-        content: [{ type: "text", text: `Thread ${threadId} was successfully resolved.` }],
-      };
-    }
-  );
 
   const gitVersionTypeStrings = Object.values(GitVersionType).filter((value): value is string => typeof value === "string");
 
