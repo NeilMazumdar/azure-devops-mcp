@@ -13,6 +13,10 @@ import {
   GitPullRequestQuery,
   GitPullRequestQueryInput,
   GitPullRequestQueryType,
+  Comment,
+  CommentType,
+  CommentThread,
+  CommentThreadStatus,
 } from "azure-devops-node-api/interfaces/GitInterfaces.js";
 import { z } from "zod";
 import { getCurrentUserDetails, getUserIdFromEmail } from "./auth.js";
@@ -32,6 +36,7 @@ const REPO_TOOLS = {
   get_pull_request_by_id: "repo_get_pull_request_by_id",
   search_commits: "repo_search_commits",
   list_pull_requests_by_commits: "repo_list_pull_requests_by_commits",
+  create_pull_request_comment: "repo_create_pull_request_comment",
 };
 
 function branchesFilterOutIrrelevantProperties(branches: GitRef[], top: number) {
@@ -600,6 +605,109 @@ function configureRepoTools(server: McpServer, tokenProvider: () => Promise<Acce
             {
               type: "text",
               text: `Error querying pull requests by commits: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.tool(
+    REPO_TOOLS.create_pull_request_comment,
+    "Create a comment in a pull request thread or create a new thread with a comment.",
+    {
+      repositoryId: z.string().describe("The ID of the repository where the pull request is located."),
+      pullRequestId: z.number().describe("The ID of the pull request to comment on."),
+      content: z.string().describe("The comment content (supports markdown)."),
+      threadId: z.number().optional().describe("Existing thread ID to add comment to. If not provided, creates new thread."),
+      status: z.enum(["active", "byDesign", "closed", "fixed", "pending", "unknown", "wontFix"]).optional().default("active").describe("Thread status (only used when creating new thread)."),
+      filePath: z.string().optional().describe("File path for file-specific comments (only for new threads)."),
+      lineStart: z.number().optional().describe("Starting line number for file comments (only for new threads)."),
+      lineEnd: z.number().optional().describe("Ending line number for file comments (defaults to lineStart)."),
+      project: z.string().optional().describe("Project ID or project name (optional)"),
+    },
+    async ({ repositoryId, pullRequestId, content, threadId, status, filePath, lineStart, lineEnd, project }) => {
+      try {
+        const connection = await connectionProvider();
+        const gitApi = await connection.getGitApi();
+
+        if (threadId) {
+          // Add comment to existing thread
+          const comment: Comment = {
+            content: content,
+            commentType: CommentType.Text,
+          };
+          
+          const result = await gitApi.createComment(
+            comment,
+            repositoryId,
+            pullRequestId,
+            threadId,
+            project
+          );
+
+          return {
+            content: [{ 
+              type: "text", 
+              text: JSON.stringify({
+                id: result.id,
+                author: {
+                  displayName: result.author?.displayName,
+                  uniqueName: result.author?.uniqueName,
+                },
+                content: result.content,
+                publishedDate: result.publishedDate,
+                threadId: threadId,
+              }, null, 2) 
+            }],
+          };
+        } else {
+          // Create new thread with initial comment
+          const threadData: CommentThread = {
+            comments: [{
+              content: content,
+              commentType: CommentType.Text,
+            }],
+            status: CommentThreadStatus[status === "byDesign" ? "ByDesign" : 
+                    status === "wontFix" ? "WontFix" : 
+                    status.charAt(0).toUpperCase() + status.slice(1) as keyof typeof CommentThreadStatus],
+          };
+
+          // Add file context if provided
+          if (filePath && lineStart) {
+            threadData.threadContext = {
+              filePath: filePath,
+              rightFileStart: { line: lineStart, offset: 1 },
+              rightFileEnd: { line: lineEnd || lineStart, offset: 1 }
+            };
+          }
+
+          const result = await gitApi.createThread(
+            threadData,
+            repositoryId,
+            pullRequestId,
+            project
+          );
+
+          return {
+            content: [{ 
+              type: "text", 
+              text: JSON.stringify({
+                id: result.id,
+                status: result.status,
+                threadContext: result.threadContext,
+                comments: trimComments(result.comments),
+              }, null, 2) 
+            }],
+          };
+        }
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error creating comment: ${error instanceof Error ? error.message : String(error)}`,
             },
           ],
           isError: true,
