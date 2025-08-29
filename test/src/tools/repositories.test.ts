@@ -5,7 +5,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { AccessToken } from "@azure/identity";
 import { WebApi } from "azure-devops-node-api";
 import { configureRepoTools, REPO_TOOLS } from "../../../src/tools/repositories";
-import { PullRequestStatus, GitVersionType, GitPullRequestQueryType, CommentThreadStatus } from "azure-devops-node-api/interfaces/GitInterfaces.js";
+import { PullRequestStatus, GitVersionType, GitPullRequestQueryType, CommentThreadStatus, CommentType } from "azure-devops-node-api/interfaces/GitInterfaces.js";
 import { getCurrentUserDetails, getUserIdFromEmail } from "../../../src/tools/auth";
 
 // Mock the auth module
@@ -2468,6 +2468,169 @@ describe("repos tools", () => {
         undefined
       );
       expect(result.content[0].text).toBe(JSON.stringify(mockThread, null, 2));
+    });
+  });
+
+  describe("repo_create_pull_request_comment", () => {
+    it("should create new comment thread", async () => {
+      configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
+      
+      const call = (server.tool as jest.Mock).mock.calls.find(
+        ([toolName]) => toolName === REPO_TOOLS.create_pull_request_comment
+      );
+      if (!call) throw new Error("repo_create_pull_request_comment tool not registered");
+      const [, , , handler] = call;
+
+      const mockThread = {
+        id: 123,
+        status: CommentThreadStatus.Active,
+        comments: [{ 
+          id: 1, 
+          content: "Test comment",
+          commentType: CommentType.Text,
+          author: { displayName: "Test User", uniqueName: "test@example.com" },
+          publishedDate: new Date().toISOString(),
+        }]
+      };
+
+      mockGitApi.createThread.mockResolvedValue(mockThread);
+
+      const result = await handler({
+        repositoryId: "repo1",
+        pullRequestId: 456,
+        content: "This is a test comment"
+      });
+
+      expect(mockGitApi.createThread).toHaveBeenCalledWith(
+        expect.objectContaining({
+          comments: [expect.objectContaining({
+            content: "This is a test comment",
+            commentType: CommentType.Text,
+          })],
+          status: CommentThreadStatus.Active,
+        }),
+        "repo1",
+        456,
+        undefined
+      );
+
+      const response = JSON.parse(result.content[0].text);
+      expect(response.id).toBe(123);
+      expect(response.comments[0].content).toBe("Test comment");
+    });
+
+    it("should add comment to existing thread", async () => {
+      configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
+      
+      const call = (server.tool as jest.Mock).mock.calls.find(
+        ([toolName]) => toolName === REPO_TOOLS.create_pull_request_comment
+      );
+      const [, , , handler] = call;
+
+      const mockComment = {
+        id: 2,
+        content: "Added comment",
+        commentType: CommentType.Text,
+        author: { displayName: "Test User", uniqueName: "test@example.com" },
+        publishedDate: new Date().toISOString(),
+      };
+
+      mockGitApi.createComment.mockResolvedValue(mockComment);
+
+      const result = await handler({
+        repositoryId: "repo1",
+        pullRequestId: 456,
+        content: "Added comment",
+        threadId: 123
+      });
+
+      expect(mockGitApi.createComment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          content: "Added comment",
+          commentType: CommentType.Text,
+        }),
+        "repo1",
+        456,
+        123,
+        undefined
+      );
+
+      const response = JSON.parse(result.content[0].text);
+      expect(response.content).toBe("Added comment");
+      expect(response.threadId).toBe(123);
+    });
+
+    it("should create file-specific comment", async () => {
+      configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
+      
+      const call = (server.tool as jest.Mock).mock.calls.find(
+        ([toolName]) => toolName === REPO_TOOLS.create_pull_request_comment
+      );
+      const [, , , handler] = call;
+
+      const mockThread = {
+        id: 124,
+        status: CommentThreadStatus.Active,
+        threadContext: {
+          filePath: "/src/app.ts",
+          rightFileStart: { line: 10, offset: 1 },
+          rightFileEnd: { line: 15, offset: 1 }
+        },
+        comments: [{ 
+          id: 3,
+          content: "File comment",
+          commentType: CommentType.Text,
+          author: { displayName: "Test User", uniqueName: "test@example.com" },
+          publishedDate: new Date().toISOString(),
+        }]
+      };
+
+      mockGitApi.createThread.mockResolvedValue(mockThread);
+
+      const result = await handler({
+        repositoryId: "repo1",
+        pullRequestId: 456,
+        content: "File comment",
+        filePath: "/src/app.ts",
+        lineStart: 10,
+        lineEnd: 15
+      });
+
+      expect(mockGitApi.createThread).toHaveBeenCalledWith(
+        expect.objectContaining({
+          threadContext: expect.objectContaining({
+            filePath: "/src/app.ts",
+            rightFileStart: { line: 10, offset: 1 },
+            rightFileEnd: { line: 15, offset: 1 }
+          }),
+        }),
+        "repo1",
+        456,
+        undefined
+      );
+
+      const response = JSON.parse(result.content[0].text);
+      expect(response.threadContext.filePath).toBe("/src/app.ts");
+    });
+
+    it("should handle errors gracefully", async () => {
+      configureRepoTools(server, tokenProvider, connectionProvider, userAgentProvider);
+      
+      const call = (server.tool as jest.Mock).mock.calls.find(
+        ([toolName]) => toolName === REPO_TOOLS.create_pull_request_comment
+      );
+      const [, , , handler] = call;
+
+      mockGitApi.createThread.mockRejectedValue(new Error("API Error"));
+
+      const result = await handler({
+        repositoryId: "repo1",
+        pullRequestId: 456,
+        content: "Test comment"
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("Error creating comment: API Error");
     });
   });
 });
